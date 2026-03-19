@@ -10,6 +10,12 @@ export default async function handler(req, res) {
   }
 
   try {
+    const { title, amount, currency_id, external_reference } = req.body || {};
+
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
     const mpResponse = await fetch(
       "https://api.mercadopago.com/checkout/preferences",
       {
@@ -21,19 +27,19 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           items: [
             {
-              title: "Prueba Shoplinks",
+              title: title || "Pedido Shoplinks",
               quantity: 1,
-              unit_price: 10,
-              currency_id: "MXN"
+              unit_price: Number(amount),
+              currency_id: currency_id || "MXN"
             }
           ],
           back_urls: {
-            success: process.env.STORE_URL,
-            pending: process.env.STORE_URL,
-            failure: process.env.STORE_URL
+            success: process.env.STORE_URL + "/?mp=success",
+            pending: process.env.STORE_URL + "/?mp=pending",
+            failure: process.env.STORE_URL + "/?mp=failure"
           },
           auto_return: "approved",
-          external_reference: "shoplinks-test-" + Date.now()
+          external_reference: external_reference || `shoplinks-${Date.now()}`
         })
       }
     );
