@@ -4,20 +4,15 @@ export default async function handler(req, res) {
   }
 
   try {
-    const {
-      title,
-      amount,
-      external_reference
-    } = req.body;
+    const { title, amount, external_reference } = req.body;
 
-    // IMPORTANTE:
-    // Para probar y destrabar ya, usa MXN.
-    // Si tu tienda muestra EUR, conviértelo antes de llegar aquí
-    // o fija un monto de prueba en MXN.
     const amountNumber = Number(amount);
 
     if (!amountNumber || amountNumber <= 0) {
-      return res.status(400).json({ error: "Invalid amount" });
+      return res.status(400).json({
+        error: "Invalid amount",
+        received_amount: amount
+      });
     }
 
     const preference = {
@@ -38,22 +33,29 @@ export default async function handler(req, res) {
       auto_return: "approved"
     };
 
-    const mpResponse = await fetch(
-      "https://api.mercadopago.com/checkout/preferences",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`
-        },
-        body: JSON.stringify(preference)
-      }
-    );
+    console.log("REQ BODY:", req.body);
+    console.log("PREFERENCE:", preference);
+
+    const mpResponse = await fetch("https://api.mercadopago.com/checkout/preferences", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`
+      },
+      body: JSON.stringify(preference)
+    });
 
     const data = await mpResponse.json();
 
+    console.log("MP STATUS:", mpResponse.status);
+    console.log("MP RESPONSE:", data);
+
     if (!mpResponse.ok) {
-      return res.status(mpResponse.status).json(data);
+      return res.status(mpResponse.status).json({
+        step: "mercadopago_error",
+        preference_sent: preference,
+        mp_response: data
+      });
     }
 
     return res.status(200).json({
@@ -62,6 +64,7 @@ export default async function handler(req, res) {
       id: data.id
     });
   } catch (error) {
+    console.error("SERVER ERROR:", error);
     return res.status(500).json({
       error: "Server error",
       detail: error.message
