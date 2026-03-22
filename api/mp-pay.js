@@ -182,34 +182,43 @@ export default async function handler(req, res) {
       }
 
       async function readCheckoutSource() {
-        const sourceUrl = getSourceUrl();
-
-        if (!sourceUrl) {
-          throw new Error("No source URL");
-        }
-
-        if (!sourceUrl.includes("/checkouts/") || !sourceUrl.includes("step=payment_gateway")) {
-          throw new Error("Source is not payment_gateway");
-        }
-
-        const response = await fetch(sourceUrl, {
-          method: "GET",
-          credentials: "include"
-        });
-
-        if (!response.ok) {
-          throw new Error("No se pudo leer la página de checkout");
-        }
-
-        const html = await response.text();
-        const text = html
-          .replace(/<script[\\s\\S]*?<\\/script>/gi, " ")
-          .replace(/<style[\\s\\S]*?<\\/style>/gi, " ")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/\\s+/g, " ");
-
-        return parseOrderAndAmountFromText(text);
+      const sourceUrl = getSourceUrl();
+    
+      if (!sourceUrl) {
+        throw new Error("No source URL");
       }
+    
+      if (!sourceUrl.includes("/checkouts/") || !sourceUrl.includes("step=payment_gateway")) {
+        throw new Error("Source is not payment_gateway");
+      }
+    
+      const normalizedUrl = new URL(sourceUrl);
+    
+      // Fuerza a usar exactamente el mismo origen donde está corriendo /apps/mp-pay
+      normalizedUrl.protocol = window.location.protocol;
+      normalizedUrl.host = window.location.host;
+    
+      console.log("ORIGINAL_SOURCE_URL:", sourceUrl);
+      console.log("NORMALIZED_SOURCE_URL:", normalizedUrl.toString());
+    
+      const response = await fetch(normalizedUrl.toString(), {
+        method: "GET",
+        credentials: "include"
+      });
+    
+      if (!response.ok) {
+        throw new Error("No se pudo leer la página de checkout");
+      }
+    
+      const html = await response.text();
+      const text = html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ");
+    
+      return parseOrderAndAmountFromText(text);
+    }
 
       async function getEurMxnRate() {
         const response = await fetch(RATE_API);
