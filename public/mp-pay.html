@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mercado Pago</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f7f7f7;
+      margin: 0;
+      padding: 40px 20px;
+      color: #222;
+    }
+    .box {
+      max-width: 680px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid #e5e5e5;
+      border-radius: 10px;
+      padding: 28px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.05);
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 28px;
+    }
+    p {
+      line-height: 1.5;
+      margin: 10px 0;
+    }
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+    .status {
+      margin: 16px 0 22px;
+      font-weight: 600;
+    }
+    .btn {
+      background: #009ee3;
+      color: #fff;
+      border: none;
+      padding: 14px 18px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
+    .hidden {
+      display: none;
+    }
+    .field {
+      margin: 14px 0;
+    }
+    .field label {
+      display: block;
+      font-size: 14px;
+      margin-bottom: 6px;
+      color: #444;
+    }
+    .field input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #d8d8d8;
+      border-radius: 8px;
+      font-size: 15px;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Mercado Pago</h1>
+    <p>Estamos preparando tu pago.</p>
+    <p class="muted">Si no redirige automáticamente, podrás continuar con el botón.</p>
+
+    <div id="status" class="status">Leyendo datos del pedido...</div>
+
+    <div id="manual" class="hidden">
+      <div class="field">
+        <label>Número de orden</label>
+        <input id="orderRef" type="text" placeholder="Ej. 205599-540144">
+      </div>
+      <div class="field">
+        <label>Total</label>
+        <input id="amount" type="text" placeholder="Ej. 1.00">
+      </div>
+      <button id="payBtn" class="btn">Pagar con Mercado Pago</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const ENDPOINT = "https://shoplinks-mercadopago.vercel.app/api/create-preference";
+      const STORE_CURRENCY = "EUR";
+
+      const statusEl = document.getElementById("status");
+      const manualEl = document.getElementById("manual");
+      const orderRefEl = document.getElementById("orderRef");
+      const amountEl = document.getElementById("amount");
+      const payBtn = document.getElementById("payBtn");
+
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+      }
+
+      function normalizeAmount(value) {
+        if (!value) return null;
+        const n = parseFloat(String(value).replace(",", "."));
+        return isNaN(n) ? null : n;
+      }
+
+      function parseOrderAndAmountFromText(text) {
+        let orderRef = null;
+        let amount = null;
+
+        const orderPatterns = [
+          /Order\s*([0-9-]+)/i,
+          /Pedido\s*([0-9-]+)/i,
+          /Orden\s*([0-9-]+)/i,
+          /订单\s*([0-9-]+)/i
+        ];
+
+        for (const pattern of orderPatterns) {
+          const match = text.match(pattern);
+          if (match && match[1]) {
+            orderRef = match[1];
+            break;
+          }
+        }
+
+        const direct = text.match(/Total Price\s*[^\d]*([0-9]+(?:[.,][0-9]{1,2})?)/i);
+        if (direct && direct[1]) {
+          amount = normalizeAmount(direct[1]);
+        }
+
+        if (!amount) {
+          const euroMatches = [...text.matchAll(/€\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi)];
+          if (euroMatches.length) {
+            amount = normalizeAmount(euroMatches[euroMatches.length - 1][1]);
+          }
+        }
+
+        return { orderRef, amount };
+      }
+
+      async function readPreviousCheckoutPage() {
+        const ref = document.referrer;
+
+        if (!ref) {
+          throw new Error("No hay referrer");
+        }
+
+        if (!ref.includes("/checkouts/") || !ref.includes("step=payment_gateway")) {
+          throw new Error("La página anterior no es payment_gateway");
+        }
+
+        const response = await fetch(ref, {
+          method: "GET",
+          credentials: "include"
+        });
+
+        if (!response.ok) {
+          throw new Error("No se pudo leer la página anterior");
+        }
+
+        const html = await response.text();
+        const text = html
+          .replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ");
+
+        return parseOrderAndAmountFromText(text);
+      }
+
+      async function createPreferenceAndRedirect(orderRef, amount) {
+        if (!orderRef || !amount) {
+          setStatus("Faltan datos del pedido.");
+          manualEl.classList.remove("hidden");
+          return;
+        }
+
+        try {
+          payBtn.disabled = true;
+          setStatus("Conectando con Mercado Pago...");
+
+          const response = await fetch(ENDPOINT, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              title: "Pedido Shoplinks",
+              amount: amount,
+              currency_id: STORE_CURRENCY,
+              external_reference: orderRef
+            })
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            console.error(data);
+            throw new Error("No se pudo crear la preferencia");
+          }
+
+          const targetUrl = data.init_point || data.sandbox_init_point;
+
+          if (!targetUrl) {
+            throw new Error("No llegó init_point");
+          }
+
+          window.location.href = targetUrl;
+        } catch (err) {
+          console.error(err);
+          setStatus("No se pudo iniciar Mercado Pago. Usa el botón para intentarlo.");
+          manualEl.classList.remove("hidden");
+          payBtn.disabled = false;
+        }
+      }
+
+      payBtn.addEventListener("click", function () {
+        const orderRef = orderRefEl.value.trim();
+        const amount = normalizeAmount(amountEl.value.trim());
+        createPreferenceAndRedirect(orderRef, amount);
+      });
+
+      (async function init() {
+        try {
+          const data = await readPreviousCheckoutPage();
+
+          if (data.orderRef) orderRefEl.value = data.orderRef;
+          if (data.amount) amountEl.value = String(data.amount);
+
+          if (data.orderRef && data.amount) {
+            setStatus("Pedido detectado. Redirigiendo a Mercado Pago...");
+            await createPreferenceAndRedirect(data.orderRef, data.amount);
+            return;
+          }
+
+          setStatus("No pude detectar automáticamente los datos del pedido.");
+          manualEl.classList.remove("hidden");
+        } catch (err) {
+          console.error(err);
+          setStatus("No pude leer automáticamente la página anterior.");
+          manualEl.classList.remove("hidden");
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>
