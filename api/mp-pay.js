@@ -1,5 +1,122 @@
+function normalizeNumber(value) {
+  if (value === null || value === undefined) return null;
+  const n = parseFloat(String(value).replace(",", ".").trim());
+  return isNaN(n) ? null : n;
+}
+
+function extractOrderAndAmount(html) {
+  const text = String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ");
+
+  let orderRef = "";
+  let amountEur = "";
+
+  const orderPatterns = [
+    /Order\s*([0-9-]+)/i,
+    /Pedido\s*([0-9-]+)/i,
+    /Orden\s*([0-9-]+)/i,
+    /订单\s*([0-9-]+)/i
+  ];
+
+  for (const pattern of orderPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      orderRef = match[1];
+      break;
+    }
+  }
+
+  const direct = text.match(/Total Price\s*[^\d]*([0-9]+(?:[.,][0-9]{1,2})?)/i);
+  if (direct && direct[1]) {
+    const n = normalizeNumber(direct[1]);
+    if (n) amountEur = String(n);
+  }
+
+  if (!amountEur) {
+    const euroMatches = [...text.matchAll(/€\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi)];
+    if (euroMatches.length) {
+      const n = normalizeNumber(euroMatches[euroMatches.length - 1][1]);
+      if (n) amountEur = String(n);
+    }
+  }
+
+  return { orderRef, amountEur };
+}
+
+async function fetchCheckoutHtml(url, cookie, userAgent) {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      cookie: cookie || "",
+      "user-agent": userAgent || "Mozilla/5.0",
+      accept: "text/html,application/xhtml+xml"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Checkout fetch failed: ${response.status}`);
+  }
+
+  return await response.text();
+}
+
+function buildAlternateUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    if (u.hostname.startsWith("www.")) {
+      u.hostname = u.hostname.replace(/^www\./, "");
+      return u.toString();
+    } else {
+      u.hostname = "www." + u.hostname;
+      return u.toString();
+    }
+  } catch {
+    return "";
+  }
+}
+
 export default async function handler(req, res) {
-  const serverReferer = req.headers.referer || "";
+  const referer = req.headers.referer || "";
+  const cookie = req.headers.cookie || "";
+  const userAgent = req.headers["user-agent"] || "";
+
+  let initialOrderRef = "";
+  let initialAmountEur = "";
+  let debugInfo = "";
+
+  try {
+    if (referer && referer.includes("/checkouts/") && referer.includes("step=payment_gateway")) {
+      const attempts = [referer];
+      const alt = buildAlternateUrl(referer);
+      if (alt && alt !== referer) attempts.push(alt);
+
+      for (const attempt of attempts) {
+        try {
+          const html = await fetchCheckoutHtml(attempt, cookie, userAgent);
+          const parsed = extractOrderAndAmount(html);
+
+          debugInfo += `TRY: ${attempt}\n`;
+          debugInfo += `PARSED ORDER: ${parsed.orderRef || "[vacío]"}\n`;
+          debugInfo += `PARSED EUR: ${parsed.amountEur || "[vacío]"}\n`;
+
+          if (parsed.orderRef && parsed.amountEur) {
+            initialOrderRef = parsed.orderRef;
+            initialAmountEur = parsed.amountEur;
+            break;
+          }
+        } catch (err) {
+          debugInfo += `TRY ERROR: ${attempt} => ${err.message}\n`;
+        }
+      }
+    } else {
+      debugInfo = "No llegó referer válido de payment_gateway";
+    }
+  } catch (err) {
+    debugInfo += `SERVER PARSE ERROR: ${err.message}\n`;
+  }
 
   const html = `<!DOCTYPE html>
 <html lang="es">
@@ -83,6 +200,17 @@ export default async function handler(req, res) {
       opacity: .65;
       cursor: not-allowed;
     }
+    .debug {
+      margin-top: 18px;
+      padding: 12px;
+      background: #fafafa;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      color: #666;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -106,23 +234,25 @@ export default async function handler(req, res) {
     </div>
 
     <button id="payBtn" class="btn">Pagar con Mercado Pago</button>
+
+    <div id="debug" class="debug"></div>
   </div>
 
   <script>
     (function () {
       const ENDPOINT = "https://shoplinks-mercadopago.vercel.app/api/create-preference";
       const RATE_API = "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=MXN";
-      const SERVER_REFERER = ${JSON.stringify(serverReferer)};
-      window.__serverReferer = SERVER_REFERER;
-      window.__browserReferrer = document.referrer || "";
-      console.log("SERVER_REFERER:", SERVER_REFERER);
-      console.log("BROWSER_REFERRER:", document.referrer || "");
+
+      const INITIAL_ORDER_REF = ${JSON.stringify(initialOrderRef)};
+      const INITIAL_AMOUNT_EUR = ${JSON.stringify(initialAmountEur)};
+      const DEBUG_INFO = ${JSON.stringify(debugInfo)};
 
       const statusEl = document.getElementById("status");
       const fxInfoEl = document.getElementById("fxInfo");
       const orderRefEl = document.getElementById("orderRef");
       const amountEurEl = document.getElementById("amountEur");
       const payBtn = document.getElementById("payBtn");
+      const debugEl = document.getElementById("debug");
 
       function setStatus(msg) {
         statusEl.textContent = msg;
@@ -137,88 +267,6 @@ export default async function handler(req, res) {
       function round2(n) {
         return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
       }
-
-      function getSourceUrl() {
-        if (SERVER_REFERER) return SERVER_REFERER;
-        const params = new URLSearchParams(window.location.search);
-        const refParam = params.get("ref");
-        if (refParam) return decodeURIComponent(refParam);
-        if (document.referrer) return document.referrer;
-        return "";
-      }
-
-      function parseOrderAndAmountFromText(text) {
-        let orderRef = null;
-        let amountEur = null;
-
-        const orderPatterns = [
-          /Order\\s*([0-9-]+)/i,
-          /Pedido\\s*([0-9-]+)/i,
-          /Orden\\s*([0-9-]+)/i,
-          /订单\\s*([0-9-]+)/i
-        ];
-
-        for (const pattern of orderPatterns) {
-          const match = text.match(pattern);
-          if (match && match[1]) {
-            orderRef = match[1];
-            break;
-          }
-        }
-
-        const direct = text.match(/Total Price\\s*[^\\d]*([0-9]+(?:[.,][0-9]{1,2})?)/i);
-        if (direct && direct[1]) {
-          amountEur = normalizeNumber(direct[1]);
-        }
-
-        if (!amountEur) {
-          const euroMatches = [...text.matchAll(/€\\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi)];
-          if (euroMatches.length) {
-            amountEur = normalizeNumber(euroMatches[euroMatches.length - 1][1]);
-          }
-        }
-
-        return { orderRef, amountEur };
-      }
-
-      async function readCheckoutSource() {
-      const sourceUrl = getSourceUrl();
-    
-      if (!sourceUrl) {
-        throw new Error("No source URL");
-      }
-    
-      if (!sourceUrl.includes("/checkouts/") || !sourceUrl.includes("step=payment_gateway")) {
-        throw new Error("Source is not payment_gateway");
-      }
-    
-      const normalizedUrl = new URL(sourceUrl);
-    
-      // Fuerza a usar exactamente el mismo origen donde está corriendo /apps/mp-pay
-      normalizedUrl.protocol = window.location.protocol;
-      normalizedUrl.host = window.location.host;
-    
-      console.log("ORIGINAL_SOURCE_URL:", sourceUrl);
-      console.log("NORMALIZED_SOURCE_URL:", normalizedUrl.toString());
-    
-      const response = await fetch(normalizedUrl.toString(), {
-        method: "GET",
-        credentials: "include"
-      });
-    
-      if (!response.ok) {
-        throw new Error("No se pudo leer la página de checkout");
-      }
-    
-      const html = await response.text();
-      const text = html
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ");
-    
-      return parseOrderAndAmountFromText(text);
-    }
 
       async function getEurMxnRate() {
         const response = await fetch(RATE_API);
@@ -240,11 +288,10 @@ export default async function handler(req, res) {
 
       function renderFxInfo(eurAmount, rate, mxnAmount, date) {
         fxInfoEl.style.display = "block";
-        fxInfoEl.innerHTML = \`
-          <div><strong>Tipo de cambio de referencia:</strong> 1 EUR = \${rate.toFixed(4)} MXN\${date ? \` (\${date})\` : ""}</div>
-          <div><strong>Monto original:</strong> €\${eurAmount.toFixed(2)} EUR</div>
-          <div><strong>Total final a pagar:</strong> $\${mxnAmount.toFixed(2)} MXN</div>
-        \`;
+        fxInfoEl.innerHTML =
+          "<div><strong>Tipo de cambio de referencia:</strong> 1 EUR = " + rate.toFixed(4) + " MXN" + (date ? " (" + date + ")" : "") + "</div>" +
+          "<div><strong>Monto original:</strong> €" + eurAmount.toFixed(2) + " EUR</div>" +
+          "<div><strong>Total final a pagar:</strong> $" + mxnAmount.toFixed(2) + " MXN</div>";
       }
 
       async function createPreferenceAndRedirect(orderRef, mxnAmount) {
@@ -263,7 +310,7 @@ export default async function handler(req, res) {
               "Content-Type": "application/json"
             },
             body: JSON.stringify({
-              title: \`Pedido \${orderRef}\`,
+              title: "Pedido " + orderRef,
               amount: mxnAmount,
               external_reference: orderRef
             })
@@ -319,37 +366,31 @@ export default async function handler(req, res) {
         payBtn.disabled = true;
         try {
           await calculateAndPay(orderRefEl.value.trim(), amountEurEl.value.trim(), false);
-      } catch (err) {
-        console.error("READ_CHECKOUT_ERROR:", err);
-        setStatus(
-          "No pude leer automáticamente la página anterior. " +
-          "Server referer: " + (SERVER_REFERER || "[vacío]") +
-          " | Browser referrer: " + (document.referrer || "[vacío]")
-        );
-        payBtn.disabled = false;
-      }
-      });
-
-      (async function init() {
-        try {
-          const data = await readCheckoutSource();
-
-          if (data.orderRef) orderRefEl.value = data.orderRef;
-          if (data.amountEur) amountEurEl.value = String(data.amountEur);
-
-          if (data.orderRef && data.amountEur) {
-            await calculateAndPay(data.orderRef, data.amountEur, true);
-            return;
-          }
-
-          setStatus("No pude detectar automáticamente los datos del pedido.");
-          payBtn.disabled = false;
         } catch (err) {
           console.error(err);
-          setStatus("No pude leer automáticamente la página anterior.");
+          setStatus("No se pudo calcular el tipo de cambio. Revisa los datos e intenta de nuevo.");
           payBtn.disabled = false;
         }
-      })();
+      });
+
+      console.log("INITIAL_ORDER_REF:", INITIAL_ORDER_REF);
+      console.log("INITIAL_AMOUNT_EUR:", INITIAL_AMOUNT_EUR);
+      console.log("DEBUG_INFO:", DEBUG_INFO);
+
+      if (DEBUG_INFO) {
+        debugEl.style.display = "block";
+        debugEl.textContent = DEBUG_INFO;
+      }
+
+      if (INITIAL_ORDER_REF) orderRefEl.value = INITIAL_ORDER_REF;
+      if (INITIAL_AMOUNT_EUR) amountEurEl.value = INITIAL_AMOUNT_EUR;
+
+      if (INITIAL_ORDER_REF && INITIAL_AMOUNT_EUR) {
+        calculateAndPay(INITIAL_ORDER_REF, INITIAL_AMOUNT_EUR, true);
+      } else {
+        setStatus("No pude detectar automáticamente los datos del pedido.");
+        payBtn.disabled = false;
+      }
     })();
   </script>
 </body>
