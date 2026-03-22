@@ -113,6 +113,10 @@ export default async function handler(req, res) {
       const ENDPOINT = "https://shoplinks-mercadopago.vercel.app/api/create-preference";
       const RATE_API = "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=MXN";
       const SERVER_REFERER = ${JSON.stringify(serverReferer)};
+      window.__serverReferer = SERVER_REFERER;
+      window.__browserReferrer = document.referrer || "";
+      console.log("SERVER_REFERER:", SERVER_REFERER);
+      console.log("BROWSER_REFERRER:", document.referrer || "");
 
       const statusEl = document.getElementById("status");
       const fxInfoEl = document.getElementById("fxInfo");
@@ -306,11 +310,15 @@ export default async function handler(req, res) {
         payBtn.disabled = true;
         try {
           await calculateAndPay(orderRefEl.value.trim(), amountEurEl.value.trim(), false);
-        } catch (err) {
-          console.error(err);
-          setStatus("No se pudo calcular el tipo de cambio. Revisa los datos e intenta de nuevo.");
-          payBtn.disabled = false;
-        }
+      } catch (err) {
+        console.error("READ_CHECKOUT_ERROR:", err);
+        setStatus(
+          "No pude leer automáticamente la página anterior. " +
+          "Server referer: " + (SERVER_REFERER || "[vacío]") +
+          " | Browser referrer: " + (document.referrer || "[vacío]")
+        );
+        payBtn.disabled = false;
+      }
       });
 
       (async function init() {
