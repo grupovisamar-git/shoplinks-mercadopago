@@ -13,7 +13,7 @@
       color: #222;
     }
     .box {
-      max-width: 680px;
+      max-width: 760px;
       margin: 0 auto;
       background: #fff;
       border: 1px solid #e5e5e5;
@@ -34,25 +34,20 @@
       font-size: 14px;
     }
     .status {
-      margin: 16px 0 22px;
+      margin: 16px 0 18px;
       font-weight: 600;
     }
-    .btn {
-      background: #009ee3;
-      color: #fff;
-      border: none;
-      padding: 14px 18px;
+    .fxbox {
+      margin: 16px 0 22px;
+      padding: 14px 16px;
+      background: #f3f8ff;
+      border: 1px solid #d7e7ff;
       border-radius: 8px;
-      font-size: 16px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .btn:disabled {
-      opacity: .65;
-      cursor: not-allowed;
-    }
-    .hidden {
+      line-height: 1.6;
       display: none;
+    }
+    .fxbox strong {
+      color: #0b63c9;
     }
     .field {
       margin: 14px 0;
@@ -71,6 +66,20 @@
       font-size: 15px;
       box-sizing: border-box;
     }
+    .btn {
+      background: #009ee3;
+      color: #fff;
+      border: none;
+      padding: 14px 18px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -81,43 +90,57 @@
 
     <div id="status" class="status">Leyendo datos del pedido...</div>
 
-    <div id="manual" class="hidden">
-      <div class="field">
-        <label>Número de orden</label>
-        <input id="orderRef" type="text" placeholder="Ej. 205599-540144">
-      </div>
-      <div class="field">
-        <label>Total</label>
-        <input id="amount" type="text" placeholder="Ej. 1.00">
-      </div>
-      <button id="payBtn" class="btn">Pagar con Mercado Pago</button>
+    <div id="fxInfo" class="fxbox"></div>
+
+    <div class="field">
+      <label>Número de orden</label>
+      <input id="orderRef" type="text" placeholder="Ej. 205599-540144">
     </div>
+
+    <div class="field">
+      <label>Total original en EUR</label>
+      <input id="amountEur" type="text" placeholder="Ej. 1.00">
+    </div>
+
+    <button id="payBtn" class="btn">Pagar con Mercado Pago</button>
   </div>
 
   <script>
     (function () {
       const ENDPOINT = "https://shoplinks-mercadopago.vercel.app/api/create-preference";
-      const STORE_CURRENCY = "EUR";
+      const RATE_API = "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=MXN";
 
       const statusEl = document.getElementById("status");
-      const manualEl = document.getElementById("manual");
+      const fxInfoEl = document.getElementById("fxInfo");
       const orderRefEl = document.getElementById("orderRef");
-      const amountEl = document.getElementById("amount");
+      const amountEurEl = document.getElementById("amountEur");
       const payBtn = document.getElementById("payBtn");
 
       function setStatus(msg) {
         statusEl.textContent = msg;
       }
 
-      function normalizeAmount(value) {
-        if (!value) return null;
-        const n = parseFloat(String(value).replace(",", "."));
+      function normalizeNumber(value) {
+        if (value === null || value === undefined) return null;
+        const n = parseFloat(String(value).replace(",", ".").trim());
         return isNaN(n) ? null : n;
+      }
+
+      function round2(n) {
+        return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+      }
+
+      function getSourceUrl() {
+        const params = new URLSearchParams(window.location.search);
+        const refParam = params.get("ref");
+        if (refParam) return decodeURIComponent(refParam);
+        if (document.referrer) return document.referrer;
+        return "";
       }
 
       function parseOrderAndAmountFromText(text) {
         let orderRef = null;
-        let amount = null;
+        let amountEur = null;
 
         const orderPatterns = [
           /Order\s*([0-9-]+)/i,
@@ -136,37 +159,37 @@
 
         const direct = text.match(/Total Price\s*[^\d]*([0-9]+(?:[.,][0-9]{1,2})?)/i);
         if (direct && direct[1]) {
-          amount = normalizeAmount(direct[1]);
+          amountEur = normalizeNumber(direct[1]);
         }
 
-        if (!amount) {
+        if (!amountEur) {
           const euroMatches = [...text.matchAll(/€\s*([0-9]+(?:[.,][0-9]{1,2})?)/gi)];
           if (euroMatches.length) {
-            amount = normalizeAmount(euroMatches[euroMatches.length - 1][1]);
+            amountEur = normalizeNumber(euroMatches[euroMatches.length - 1][1]);
           }
         }
 
-        return { orderRef, amount };
+        return { orderRef, amountEur };
       }
 
-      async function readPreviousCheckoutPage() {
-        const ref = document.referrer;
+      async function readCheckoutSource() {
+        const sourceUrl = getSourceUrl();
 
-        if (!ref) {
-          throw new Error("No hay referrer");
+        if (!sourceUrl) {
+          throw new Error("No source URL");
         }
 
-        if (!ref.includes("/checkouts/") || !ref.includes("step=payment_gateway")) {
-          throw new Error("La página anterior no es payment_gateway");
+        if (!sourceUrl.includes("/checkouts/") || !sourceUrl.includes("step=payment_gateway")) {
+          throw new Error("Source is not payment_gateway");
         }
 
-        const response = await fetch(ref, {
+        const response = await fetch(sourceUrl, {
           method: "GET",
           credentials: "include"
         });
 
         if (!response.ok) {
-          throw new Error("No se pudo leer la página anterior");
+          throw new Error("No se pudo leer la página de checkout");
         }
 
         const html = await response.text();
@@ -179,10 +202,36 @@
         return parseOrderAndAmountFromText(text);
       }
 
-      async function createPreferenceAndRedirect(orderRef, amount) {
-        if (!orderRef || !amount) {
-          setStatus("Faltan datos del pedido.");
-          manualEl.classList.remove("hidden");
+      async function getEurMxnRate() {
+        const response = await fetch(RATE_API);
+        if (!response.ok) {
+          throw new Error("No se pudo consultar el tipo de cambio");
+        }
+
+        const data = await response.json();
+
+        if (!data.rates || !data.rates.MXN) {
+          throw new Error("La respuesta del tipo de cambio no contiene MXN");
+        }
+
+        return {
+          rate: Number(data.rates.MXN),
+          date: data.date || ""
+        };
+      }
+
+      function renderFxInfo(eurAmount, rate, mxnAmount, date) {
+        fxInfoEl.style.display = "block";
+        fxInfoEl.innerHTML = `
+          <div><strong>Tipo de cambio de referencia:</strong> 1 EUR = ${rate.toFixed(4)} MXN${date ? ` (${date})` : ""}</div>
+          <div><strong>Monto original:</strong> €${eurAmount.toFixed(2)} EUR</div>
+          <div><strong>Total final a pagar:</strong> $${mxnAmount.toFixed(2)} MXN</div>
+        `;
+      }
+
+      async function createPreferenceAndRedirect(orderRef, mxnAmount) {
+        if (!orderRef || !mxnAmount) {
+          setStatus("Faltan datos para iniciar el pago.");
           return;
         }
 
@@ -196,9 +245,8 @@
               "Content-Type": "application/json"
             },
             body: JSON.stringify({
-              title: "Pedido Shoplinks",
-              amount: amount,
-              currency_id: STORE_CURRENCY,
+              title: `Pedido ${orderRef}`,
+              amount: mxnAmount,
               external_reference: orderRef
             })
           });
@@ -220,36 +268,64 @@
         } catch (err) {
           console.error(err);
           setStatus("No se pudo iniciar Mercado Pago. Usa el botón para intentarlo.");
-          manualEl.classList.remove("hidden");
           payBtn.disabled = false;
         }
       }
 
-      payBtn.addEventListener("click", function () {
-        const orderRef = orderRefEl.value.trim();
-        const amount = normalizeAmount(amountEl.value.trim());
-        createPreferenceAndRedirect(orderRef, amount);
+      async function calculateAndPay(orderRef, eurAmount, autoGo) {
+        const eur = normalizeNumber(eurAmount);
+
+        if (!orderRef || !eur || eur <= 0) {
+          setStatus("Faltan datos del pedido.");
+          payBtn.disabled = false;
+          return;
+        }
+
+        const fx = await getEurMxnRate();
+        const mxnAmount = round2(eur * fx.rate);
+
+        renderFxInfo(eur, fx.rate, mxnAmount, fx.date);
+
+        if (autoGo) {
+          setStatus("Pedido detectado. Tipo de cambio calculado. Redirigiendo a Mercado Pago...");
+          setTimeout(function () {
+            createPreferenceAndRedirect(orderRef, mxnAmount);
+          }, 1200);
+        } else {
+          setStatus("Tipo de cambio calculado. Continuando con Mercado Pago...");
+          createPreferenceAndRedirect(orderRef, mxnAmount);
+        }
+      }
+
+      payBtn.addEventListener("click", async function () {
+        payBtn.disabled = true;
+        try {
+          await calculateAndPay(orderRefEl.value.trim(), amountEurEl.value.trim(), false);
+        } catch (err) {
+          console.error(err);
+          setStatus("No se pudo calcular el tipo de cambio. Revisa los datos e intenta de nuevo.");
+          payBtn.disabled = false;
+        }
       });
 
       (async function init() {
         try {
-          const data = await readPreviousCheckoutPage();
+          const data = await readCheckoutSource();
 
           if (data.orderRef) orderRefEl.value = data.orderRef;
-          if (data.amount) amountEl.value = String(data.amount);
+          if (data.amountEur) amountEurEl.value = String(data.amountEur);
 
-          if (data.orderRef && data.amount) {
-            setStatus("Pedido detectado. Redirigiendo a Mercado Pago...");
-            await createPreferenceAndRedirect(data.orderRef, data.amount);
+          if (data.orderRef && data.amountEur) {
+            await calculateAndPay(data.orderRef, data.amountEur, true);
             return;
           }
 
           setStatus("No pude detectar automáticamente los datos del pedido.");
-          manualEl.classList.remove("hidden");
+          payBtn.disabled = false;
         } catch (err) {
           console.error(err);
           setStatus("No pude leer automáticamente la página anterior.");
-          manualEl.classList.remove("hidden");
+          payBtn.disabled = false;
         }
       })();
     })();
